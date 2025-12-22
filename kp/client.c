@@ -2,126 +2,85 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <semaphore.h>
 
-#define GAME_MAP_FILE "game_state.dat"
-#define MAX_PLAYERS 4
-#define WORD_LEN 256
+int main() {
+    int fd = open("game_shm.dat", O_RDWR);
+    if (fd == -1) { perror("Run server first"); return 1; }
+    SharedMemory* shm = mmap(NULL, sizeof(SharedMemory), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
-typedef struct {
-    int gameStarted;
-    char word[WORD_LEN];
-    int numPlayers;
-    int currentPlayer;
-    int gameOver;
-    int scores[MAX_PLAYERS];
-    int playerTurn;
-    char guess[WORD_LEN];
-    int bulls;
-    int cows;
-    int hasResult;
-    sem_t shm_mutex;
-} GameData;
+    printf("1. Create Game\n2. Join Game\nChoice: ");
+    int choice; scanf("%d", &choice);
 
-int main(int argc, char *argv[]) {
-    int fd;
-    GameData* gameData;
-    int myPlayerIndex = -1;
+    GameData* game = NULL;
+    int myIdx = -1;
 
-    fd = open(GAME_MAP_FILE, O_RDWR);
-    if (fd == -1) {
-        perror("open failed. Is server running?");
-        return 1;
-    }
-
-    gameData = (GameData*)mmap(NULL, sizeof(GameData), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (gameData == MAP_FAILED) {
-        perror("mmap failed");
-        close(fd);
-        return 1;
-    }
-
-    printf("--- Client Connected (File Mapping) ---\n");
-
-    if (sem_wait(&gameData->shm_mutex) == -1) {
-        perror("sem_wait failed");
-        munmap(gameData, sizeof(GameData));
-        close(fd);
-        return 1;
-    }
-
-    if (gameData->numPlayers < MAX_PLAYERS) {
-        myPlayerIndex = gameData->numPlayers;
-        gameData->numPlayers++;
-        gameData->scores[myPlayerIndex] = 0;
-        printf("Joined as Player %d (Index: %d).\n", myPlayerIndex + 1, myPlayerIndex);
-    } else {
-        printf("Game is full. Cannot join.\n");
-        sem_post(&gameData->shm_mutex);
-        munmap(gameData, sizeof(GameData));
-        close(fd);
-        return 1;
-    }
-
-    sem_post(&gameData->shm_mutex);
-
-    printf("Waiting for the game to start...\n");
-    while (!gameData->gameStarted) {
-        if (gameData->gameOver) {
-            printf("Game was shut down.\n");
-            munmap(gameData, sizeof(GameData));
-            close(fd);
-            return 0;
+    if (choice == 1) {
+        char name[64]; int count;
+        printf("Enter game name: "); scanf("%s", name);
+        printf("Number of players: "); scanf("%d", &count);
+        
+        for (int i = 0; i < MAX_GAMES; i++) {
+            if (strlen(shm->games[i].gameName) == 0) {
+                game = &shm->games[i];
+                strcpy(game->gameName, name);
+                game->maxPlayers = count;
+                game->joinedPlayers = 1;
+                game->playerTurn = -1;
+                sem_init(&game->shm_mutex, 1, 1);
+                myIdx = 0;
+                game->players[myIdx].active = 1;
+                break;
+            }
         }
-        sleep(1);
+    } else {
+        char name[64];
+        printf("Enter game name to join: "); scanf("%s", name);
+        for (int i = 0; i < MAX_GAMES; i++) {
+            if (strcmp(shm->games[i].gameName, name) == 0) {
+                game = &shm->games[i];
+                sem_wait(&game->shm_mutex);
+                if (game->joinedPlayers < game->maxPlayers) {
+                    myIdx = game->joinedPlayers++;
+                    game->players[myIdx].active = 1;
+                }
+                sem_post(&game->shm_mutex);
+                break;
+            }
+        }
     }
 
-    while (!gameData->gameOver) {
-        if (gameData->currentPlayer == myPlayerIndex) {
-            if (gameData->hasResult) {
-                printf("\n--- Last Guess Result ---\n");
-                printf("Bulls: %d, Cows: %d\n", gameData->bulls, gameData->cows);
-                gameData->hasResult = 0;
+    if (!game || myIdx == -1) { printf("Error joining game.\n"); return 1; }
+
+    printf("Joined '%s' as Player %d. Waiting for start...\n", game->gameName, myIdx + 1);
+
+    while (!game->gameOver) {
+        if (!game->gameStarted) { usleep(500000); continue; }
+
+        if (game->currentPlayer == myIdx) {
+            if (game->hasResult) {
+                printf("Bulls: %d, Cows: %d\n", game->bulls, game->cows);
+                game->hasResult = 0;
             }
+            printf("Your guess: ");
+            char g[WORD_LEN]; scanf("%s", g);
             
-            printf("\n>>> Player %d, enter your guess: ", myPlayerIndex + 1);
-            char guess[WORD_LEN];
-            if (scanf("%s", guess) != 1) break;
-            
-            sem_wait(&gameData->shm_mutex);
-            strncpy(gameData->guess, guess, WORD_LEN - 1);
-            gameData->guess[WORD_LEN - 1] = '\0';
-            gameData->playerTurn = myPlayerIndex;
-            sem_post(&gameData->shm_mutex);
-            
-            printf("Waiting for server...\n");
-            while (gameData->currentPlayer == myPlayerIndex && !gameData->gameOver) {
-                usleep(100000);
-            }
+            sem_wait(&game->shm_mutex);
+            strcpy(game->guess, g);
+            game->playerTurn = myIdx;
+            sem_post(&game->shm_mutex);
+
+            while (game->playerTurn == myIdx && !game->gameOver) usleep(100000);
         } else {
-            if (gameData->hasResult) {
-                printf("\n--- Result from Player %d: Bulls: %d, Cows: %d ---\n", 
-                        (gameData->currentPlayer == 0 ? gameData->numPlayers : gameData->currentPlayer), 
-                        gameData->bulls, gameData->cows);
-                gameData->hasResult = 0;
-            }
-            printf("\rWaiting for Player %d...     ", gameData->currentPlayer + 1);
+            printf("\rWaiting for Player %d...", game->currentPlayer + 1);
             fflush(stdout);
             sleep(1);
         }
     }
 
-    printf("\n--- Game Over ---\n");
-    printf("Final Scores:\n");
-    for (int i = 0; i < gameData->numPlayers; i++) {
-        printf("Player %d: %d\n", i + 1, gameData->scores[i]);
-    }
-
-    munmap(gameData, sizeof(GameData));
-    close(fd);
-    
+    printf("\nGame Over! Winner is Player %d\n", game->currentPlayer + 1);
+    game->players[myIdx].active = 0;
     return 0;
 }
