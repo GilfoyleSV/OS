@@ -1,21 +1,25 @@
-#define MAX_GAMES 5
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <semaphore.h>
+
+#define GAME_MAP_FILE "game_state.dat"
 #define MAX_PLAYERS 4
 #define WORD_LEN 256
 
 typedef struct {
-    int active;
-} PlayerInfo;
-
-typedef struct {
-    char gameName[64];
     int gameStarted;
     char word[WORD_LEN];
-    int maxPlayers;
-    int joinedPlayers;
+    int numPlayers;
     int currentPlayer;
     int gameOver;
     int scores[MAX_PLAYERS];
-    PlayerInfo players[MAX_PLAYERS];
     int playerTurn;
     char guess[WORD_LEN];
     int bulls;
@@ -23,8 +27,3 @@ typedef struct {
     int hasResult;
     sem_t shm_mutex;
 } GameData;
-
-typedef struct {
-    int numGames;
-    GameData games[MAX_GAMES];
-} SharedMemory;
